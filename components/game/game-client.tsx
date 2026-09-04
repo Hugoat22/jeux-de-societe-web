@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Backpack,
+  Bot,
   Bone,
   Check,
   ChevronRight,
@@ -39,11 +40,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import {
   addPlayer,
-  addTestPlayers,
   advanceDay,
   beginBriefing,
   beginEquipment,
   beginSurvival,
+  botRecommendations,
   chatDetectionRisk,
   choiceAvailable,
   createGame,
@@ -54,6 +55,7 @@ import {
   getScenario,
   resolveChoice,
   sendPrivateMessage,
+  startDuoMode,
   statusLabel,
   toggleEquipment,
 } from '@/lib/game';
@@ -137,7 +139,7 @@ export function GameClient({ code }: Props) {
   return (
     <main className="min-h-dvh bg-background text-foreground">
       <GameHeader game={game} currentPlayerId={currentPlayer.id} onCharacter={() => setPanel('character')} onHistory={() => setPanel('history')} onChat={() => setPanel('chat')} />
-      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} onFill={() => update(addTestPlayers)} onStart={() => update(beginBriefing)} />}
+      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} onStart={() => update(beginBriefing)} onStartDuo={() => update(startDuoMode)} />}
       {game.phase === 'briefing' && <Briefing game={game} onContinue={() => update(beginEquipment)} />}
       {game.phase === 'equipment' && <Equipment game={game} onToggle={(id) => update((state) => toggleEquipment(state, id))} onStart={() => update(beginSurvival)} />}
       {game.phase === 'event' && <EventScreen game={game} onChoose={(choiceId) => update((state) => resolveChoice(state, choiceId))} />}
@@ -176,8 +178,9 @@ function GameHeader({ game, currentPlayerId, onCharacter, onHistory, onChat }: {
   );
 }
 
-function Lobby({ game, currentPlayerId, onFill, onStart }: { game: GameState; currentPlayerId: string; onFill: () => void; onStart: () => void }) {
+function Lobby({ game, currentPlayerId, onStart, onStartDuo }: { game: GameState; currentPlayerId: string; onStart: () => void; onStartDuo: () => void }) {
   const isHost = game.hostPlayerId === currentPlayerId;
+  const humans = game.players.filter((player) => !player.isBot);
   return (
     <Screen>
       <SectionLabel icon={Radio}>Rassemblement</SectionLabel>
@@ -203,15 +206,22 @@ function Lobby({ game, currentPlayerId, onFill, onStart }: { game: GameState; cu
               <div className="truncate text-sm font-semibold">{player.nickname} {player.id === currentPlayerId && <span className="font-normal text-muted-foreground">(vous)</span>}</div>
               <div className="text-xs text-muted-foreground">{player.character.name} · {player.character.specialty}</div>
             </div>
-            {player.isHost ? <Badge variant="outline" className="text-[9px]">HÔTE</Badge> : <Check className="size-4 text-emerald-400" />}
+            {player.isHost ? <Badge variant="outline" className="text-[9px]">HÔTE</Badge> : player.isBot ? <Badge variant="outline" className="border-sky-400/25 text-[9px] text-sky-300">BOT</Badge> : <Check className="size-4 text-emerald-400" />}
           </div>
         ))}
       </div>
 
       <div className="mt-6 space-y-2">
-        {game.players.length < 3 && <Button variant="outline" className="h-11 w-full rounded-xl border-dashed" onClick={onFill}>Ajouter Maya et Noé pour tester</Button>}
-        <Button className="h-13 w-full justify-between rounded-xl px-5" disabled={!isHost || game.players.length < 3} onClick={onStart}>
-          {isHost ? 'Préparer l’évacuation' : 'En attente de l’hôte'}
+        <div className="rounded-2xl border border-sky-400/20 bg-sky-400/[0.06] p-4">
+          <div className="flex items-center gap-2 text-xs font-bold text-sky-200"><Bot className="size-4" /> Mode duo assisté</div>
+          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">À deux joueurs humains, Inès l’éclaireuse et Noé le secouriste rejoignent automatiquement le groupe.</p>
+          <Button variant="outline" className="mt-3 h-11 w-full justify-between rounded-xl border-sky-400/25" disabled={!isHost || humans.length !== 2} onClick={onStartDuo}>
+            {humans.length < 2 ? 'En attente du 2e joueur' : humans.length === 2 ? 'Lancer avec Inès et Noé' : 'Réservé aux parties à 2'}
+            <ArrowRight />
+          </Button>
+        </div>
+        <Button className="h-13 w-full justify-between rounded-xl px-5" disabled={!isHost || humans.length < 3} onClick={onStart}>
+          {isHost ? 'Lancer en mode standard' : 'En attente de l’hôte'}
           <ArrowRight />
         </Button>
       </div>
@@ -242,6 +252,12 @@ function Briefing({ game, onContinue }: { game: GameState; onContinue: () => voi
             <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-primary">La situation maintenant</p>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">{scenario.situation}</p>
           </div>
+          {game.mode === 'duo_bots' && (
+            <div className="rounded-xl border border-sky-400/20 bg-sky-400/[0.06] p-4">
+              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-sky-300"><Bot className="size-3.5" /> Renforts du mode duo</div>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">Inès cherchera des réserves chaque nuit. Noé stabilisera automatiquement le joueur humain le plus affaibli. Leur sac ajoute aussi de l’eau, des vivres, un soin et des matériaux.</p>
+            </div>
+          )}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Ce qui vous attend</p>
             <div className="mt-3 space-y-2">
@@ -317,6 +333,7 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
   const event = currentEvent(game);
   if (!event) return null;
   const artwork = event.image ?? getScenario(game).image;
+  const recommendations = botRecommendations(game, event);
   return (
     <Screen>
       <ResourceStrip game={game} />
@@ -347,11 +364,29 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
         </CardContent>
       </Card>
 
+      {recommendations.length > 0 && (
+        <div className="mt-4 rounded-2xl border border-sky-400/20 bg-sky-400/[0.05] p-4">
+          <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-sky-300"><Bot className="size-3.5" /> Avis des compagnons</div>
+          <div className="mt-3 space-y-3">
+            {recommendations.map((recommendation) => (
+              <div key={recommendation.botId} className="flex gap-3">
+                <span className="grid size-8 shrink-0 place-items-center rounded-full bg-sky-400/10 text-xs font-black text-sky-300">{recommendation.botName[0]}</span>
+                <div>
+                  <div className="text-xs font-bold">{recommendation.botName} <span className="font-normal text-muted-foreground">· {recommendation.specialty}</span></div>
+                  <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{recommendation.reason}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-6">
         <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Décidez ensemble</p>
         <div className="space-y-3">
           {event.choices.map((choice, index) => {
             const available = choiceAvailable(game, choice);
+            const advisors = recommendations.filter((recommendation) => recommendation.choiceId === choice.id);
             return (
               <button
                 key={choice.id}
@@ -366,6 +401,7 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
                       <strong className="text-sm">{choice.label}</strong>
                       <RiskBadge risk={choice.risk} />
                     </span>
+                    {advisors.length > 0 && <span className="mt-1.5 block text-[9px] font-bold uppercase tracking-wider text-sky-300">Conseillé par {advisors.map((advisor) => advisor.botName).join(' et ')}</span>}
                     <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">{available ? choice.hint : 'Ressource ou équipement manquant.'}</span>
                     {available && (
                       <span className="mt-3 flex flex-wrap gap-1.5">
@@ -487,7 +523,7 @@ function EndingScreen({ game, onRestart }: { game: GameState; onRestart: () => v
 }
 
 function ChatScreen({ game, playerId, onBack, onSend }: { game: GameState; playerId: string; onBack: () => void; onSend: (recipientId: string, text: string) => void }) {
-  const recipients = game.players.filter((player) => player.alive && player.id !== playerId);
+  const recipients = game.players.filter((player) => player.alive && !player.isBot && player.id !== playerId);
   const [recipientId, setRecipientId] = useState(recipients[0]?.id ?? '');
   const [draft, setDraft] = useState('');
   const risk = chatDetectionRisk(game, playerId);

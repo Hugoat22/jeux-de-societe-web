@@ -127,6 +127,7 @@ export type GameState = {
   day: number;
   seed: number;
   scenarioId: string;
+  mode: 'standard' | 'duo_bots';
   hostPlayerId: string;
   players: Player[];
   selectedEquipment: string[];
@@ -433,6 +434,7 @@ export function createGame(code: string, nickname: string): GameState {
     day: 0,
     seed,
     scenarioId: SCENARIOS[seed % SCENARIOS.length].id,
+    mode: 'standard',
     hostPlayerId: hostId,
     players: [{ id: hostId, nickname, isHost: true, ready: true, character: cloneCharacter(0), alive: true }],
     selectedEquipment: ['water', 'food', 'medkit', 'radio', 'rope'],
@@ -458,6 +460,40 @@ export function addTestPlayers(state: GameState): GameState {
     alive: true,
   }));
   return { ...state, players: [...state.players, ...extras], version: state.version + 1 };
+}
+
+export function startDuoMode(state: GameState): GameState {
+  if (state.phase !== 'lobby') return state;
+  const humans = state.players.filter((player) => !player.isBot);
+  if (humans.length !== 2) return state;
+  const bots: Player[] = [
+    {
+      id: 'bot-ines',
+      nickname: 'Inès',
+      isHost: false,
+      isBot: true,
+      ready: true,
+      character: cloneCharacter(3),
+      alive: true,
+    },
+    {
+      id: 'bot-noe',
+      nickname: 'Noé',
+      isHost: false,
+      isBot: true,
+      ready: true,
+      character: cloneCharacter(2),
+      alive: true,
+    },
+  ];
+  return {
+    ...state,
+    mode: 'duo_bots',
+    phase: 'briefing',
+    flags: { ...state.flags, duo_bot_support: true },
+    players: [...humans, ...bots],
+    version: state.version + 1,
+  };
 }
 
 export function addPlayer(state: GameState, nickname: string, playerId: string): GameState {
@@ -540,6 +576,12 @@ export function beginSurvival(state: GameState): GameState {
     }
     if (item.flag) flags[item.flag] = true;
   }
+  if (state.mode === 'duo_bots') {
+    resources.water += 4;
+    resources.food += 4;
+    resources.medicine += 1;
+    resources.materials += 1;
+  }
   const scenario = getScenario(state);
   let started: GameState = {
     ...state,
@@ -548,7 +590,12 @@ export function beginSurvival(state: GameState): GameState {
     resources,
     flags,
     version: state.version + 1,
-    log: [{ day: 0, title: scenario.title, text: `${scenario.situation} Le groupe emporte ${state.selectedEquipment.length} objets.`, tone: 'neutral' }],
+    log: [{
+      day: 0,
+      title: scenario.title,
+      text: `${scenario.situation} Le groupe emporte ${state.selectedEquipment.length} objets.${state.mode === 'duo_bots' ? ' Inès et Noé ajoutent leur réserve de secours.' : ''}`,
+      tone: 'neutral',
+    }],
   };
   for (const effect of scenario.startingEffects) started = applyEffect(started, effect);
   return drawEvent(started);
@@ -556,6 +603,55 @@ export function beginSurvival(state: GameState): GameState {
 
 export function currentEvent(state: GameState) {
   return EVENTS.find((event) => event.id === state.currentEventId);
+}
+
+export type BotRecommendation = {
+  botId: string;
+  botName: string;
+  specialty: string;
+  choiceId: string;
+  reason: string;
+};
+
+export function botRecommendations(state: GameState, event: EventDefinition): BotRecommendation[] {
+  if (state.mode !== 'duo_bots') return [];
+  return state.players.filter((player) => player.isBot && player.alive).map((bot) => {
+    const ranked = event.choices
+      .filter((choice) => choiceAvailable(state, choice))
+      .map((choice) => ({ choice, score: scoreChoiceForBot(bot, choice, event) }))
+      .sort((a, b) => b.score - a.score);
+    const selected = ranked[0]?.choice;
+    if (!selected) return undefined;
+    const isMedic = bot.character.skills.Médecine === 4;
+    return {
+      botId: bot.id,
+      botName: bot.nickname,
+      specialty: isMedic ? 'Secouriste' : 'Éclaireuse',
+      choiceId: selected.id,
+      reason: isMedic
+        ? `« ${selected.label} » préserve le mieux la santé et limite les risques graves.`
+        : `« ${selected.label} » offre le meilleur rapport entre ressources, information et danger.`,
+    };
+  }).filter((recommendation): recommendation is BotRecommendation => Boolean(recommendation));
+}
+
+function scoreChoiceForBot(bot: Player, choice: EventChoice, event: EventDefinition) {
+  const riskScores: Record<EventChoice['risk'], number> = bot.character.skills.Médecine === 4
+    ? { Faible: 6, Modéré: 3, Élevé: -1, Extrême: -6 }
+    : { Faible: 3, Modéré: 4, Élevé: 1, Extrême: -4 };
+  let score = riskScores[choice.risk];
+  for (const effect of choice.effects) {
+    if (effect.type === 'resource') score += effect.amount * (effect.amount > 0 ? 1.2 : 1.5);
+    if (effect.type === 'health') score += effect.amount * (bot.character.skills.Médecine === 4 ? 0.8 : 0.45);
+    if (effect.type === 'morale') score += effect.amount * 0.35;
+    if (effect.type === 'fatigue') score -= effect.amount * 0.25;
+    if (effect.type === 'condition') score -= bot.character.skills.Médecine === 4 ? 8 : 5;
+    if (effect.type === 'flag') score += bot.character.skills.Observation === 4 ? 3 : 1;
+    if (effect.type === 'expedition' && bot.character.skills.Observation === 4) score += 4;
+    if (effect.type === 'finish' && effect.ending === 'evacuation') score += 20;
+  }
+  if (event.category === 'expédition' && bot.character.skills.Observation === 4) score += 2;
+  return score;
 }
 
 export function choiceAvailable(state: GameState, choice: EventChoice) {
@@ -632,6 +728,7 @@ export function advanceDay(state: GameState): GameState {
   let next: GameState = { ...state, day: state.day + 1, phase: 'event', splitGroup: undefined, lastChoiceId: undefined, lastResolution: undefined, version: state.version + 1 };
   next = applyDailyNeeds(next);
   next = progressConditions(next);
+  next = applyBotSupport(next);
   if (next.players.every((player) => !player.alive)) {
     return { ...next, phase: 'finished', ending: 'death', log: [...next.log, { day: next.day, title: 'Le dernier silence', text: 'Aucun membre du groupe n’a survécu.', tone: 'bad' }] };
   }
@@ -659,6 +756,41 @@ function applyDailyNeeds(state: GameState): GameState {
       return { ...player, character, alive: character.health > 0 };
     }),
   };
+}
+
+function applyBotSupport(state: GameState): GameState {
+  if (state.mode !== 'duo_bots') return state;
+  const ines = state.players.find((player) => player.id === 'bot-ines' && player.alive);
+  const noe = state.players.find((player) => player.id === 'bot-noe' && player.alive);
+  const foundResource: ResourceKey = state.day % 2 === 0 ? 'food' : 'water';
+  const resourceLabel = foundResource === 'food' ? 'vivres' : 'eau';
+  let next = state;
+
+  if (ines) {
+    next = {
+      ...next,
+      resources: { ...next.resources, [foundResource]: next.resources[foundResource] + 2 },
+    };
+  }
+
+  if (noe) {
+    const humans = next.players.filter((player) => !player.isBot && player.alive);
+    const patient = [...humans].sort((a, b) => a.character.health - b.character.health)[0];
+    next = {
+      ...next,
+      players: next.players.map((player) => {
+        if (!patient || player.id !== patient.id) return player;
+        return { ...player, character: { ...player.character, health: clamp(player.character.health + 4), fatigue: clamp(player.character.fatigue - 4) } };
+      }),
+    };
+  }
+
+  const actions = [
+    ines ? `Inès rapporte 2 ${resourceLabel}.` : '',
+    noe ? 'Noé soigne la personne la plus affaiblie.' : '',
+  ].filter(Boolean).join(' ');
+  if (!actions) return next;
+  return { ...next, log: [...next.log, { day: next.day, title: 'Les compagnons agissent', text: actions, tone: 'good' }] };
 }
 
 function progressConditions(state: GameState): GameState {

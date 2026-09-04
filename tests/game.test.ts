@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  addPlayer,
   addTestPlayers,
   advanceDay,
   beginBriefing,
   beginEquipment,
   beginSurvival,
+  botRecommendations,
   chatDetectionRisk,
   createGame,
   currentEvent,
@@ -13,6 +15,7 @@ import {
   resolveChoice,
   SCENARIOS,
   sendPrivateMessage,
+  startDuoMode,
   toggleEquipment,
 } from '../lib/game.ts';
 
@@ -85,4 +88,20 @@ test('private messages only expose participants to a detected observer', () => {
   assert.ok(message.detectedByIds.every((id) => id !== sender.id && id !== recipient.id));
   assert.ok(chatDetectionRisk(state, sender.id) >= 15);
   assert.equal(next.version, state.version + 1);
+});
+
+test('duo mode adds two competent companions and support supplies', () => {
+  let state = createGame('2468', 'Hugo');
+  state = addPlayer(state, 'Alice', 'human-2');
+  state = startDuoMode(state);
+  assert.equal(state.phase, 'briefing');
+  assert.equal(state.mode, 'duo_bots');
+  assert.equal(state.players.filter((player) => player.isBot).length, 2);
+  state = beginEquipment(state);
+  state = beginSurvival(state);
+  assert.ok(state.resources.food >= 16);
+  assert.ok(botRecommendations(state, currentEvent(state)!).length === 2);
+
+  state = advanceDay({ ...state, phase: 'resolution' });
+  assert.ok(state.log.some((entry) => entry.title === 'Les compagnons agissent'));
 });
