@@ -1,4 +1,4 @@
-export type Phase = 'lobby' | 'equipment' | 'event' | 'resolution' | 'finished';
+export type Phase = 'lobby' | 'briefing' | 'equipment' | 'event' | 'resolution' | 'finished';
 
 export type SkillKey =
   | 'Médecine'
@@ -62,6 +62,11 @@ export type EventChoice = {
   };
   effects: Effect[];
   result: string;
+  consequence: {
+    immediate: string[];
+    persistent?: string;
+    future?: string;
+  };
 };
 
 export type EventCondition =
@@ -80,6 +85,7 @@ export type EventDefinition = {
   cooldownDays: number;
   weight: number;
   minDay?: number;
+  image?: string;
   conditions?: EventCondition[];
   choices: EventChoice[];
 };
@@ -91,12 +97,36 @@ export type LogEntry = {
   tone?: 'neutral' | 'good' | 'bad';
 };
 
+export type DecisionRecord = {
+  id: string;
+  day: number;
+  eventId: string;
+  eventTitle: string;
+  choiceId: string;
+  choiceLabel: string;
+  immediate: string[];
+  persistent?: string;
+  future?: string;
+  outcome: string;
+};
+
+export type ChatMessage = {
+  id: string;
+  day: number;
+  senderId: string;
+  recipientId: string;
+  text: string;
+  detectedByIds: string[];
+  createdAt: number;
+};
+
 export type GameState = {
   code: string;
   version: number;
   phase: Phase;
   day: number;
   seed: number;
+  scenarioId: string;
   hostPlayerId: string;
   players: Player[];
   selectedEquipment: string[];
@@ -107,6 +137,8 @@ export type GameState = {
   lastChoiceId?: string;
   lastResolution?: string;
   log: LogEntry[];
+  decisions: DecisionRecord[];
+  messages: ChatMessage[];
   splitGroup?: { away: string[]; location: string };
   ending?: 'evacuation' | 'death' | 'missed';
 };
@@ -120,6 +152,58 @@ export type EquipmentDefinition = {
   grant: Partial<Record<ResourceKey, number>>;
   flag?: string;
 };
+
+export type ScenarioDefinition = {
+  id: string;
+  title: string;
+  eyebrow: string;
+  pitch: string;
+  situation: string;
+  threats: string[];
+  image: string;
+  categoryWeights: Partial<Record<EventDefinition['category'], number>>;
+  startingEffects: Effect[];
+};
+
+export const SCENARIOS: ScenarioDefinition[] = [
+  {
+    id: 'ashfall',
+    title: 'La pluie de cendres',
+    eyebrow: 'Le ciel a brûlé avant l’aube',
+    pitch: 'Une série d’explosions a recouvert la ville d’un nuage brûlant. Les autorités ont cessé d’émettre et chaque respiration dehors rapproche le groupe de l’épuisement.',
+    situation: 'Vous avez trouvé un ancien local technique à la lisière de la zone rouge. Il peut tenir quelques jours, à condition de protéger l’air, le toit et vos réserves.',
+    threats: ['Des tempêtes rendront les sorties imprévisibles', 'Le signal d’évacuation pourrait ne passer qu’une fois', 'Le refuge attirera d’autres survivants'],
+    image: '/scenarios/ashfall.png',
+    categoryWeights: { météo: 1.8, refuge: 1.35 },
+    startingEffects: [{ type: 'health', amount: -3, target: 'all' }, { type: 'flag', key: 'scenario_ashfall', value: true }],
+  },
+  {
+    id: 'blackout',
+    title: 'La nuit sans réseau',
+    eyebrow: 'Le courant n’est jamais revenu',
+    pitch: 'La panne devait durer deux heures. Trois jours plus tard, les téléphones sont morts, les immeubles gèlent et personne ne sait pourquoi les convois militaires ont quitté la ville.',
+    situation: 'Votre groupe s’est installé dans une salle municipale condamnée. Une vieille radio, quelques bougies et les décisions prises ensemble sont tout ce qui vous relie encore au dehors.',
+    threats: ['Le froid épuisera les personnes mal équipées', 'L’information aura autant de valeur que la nourriture', 'La confiance se fissurera dans l’obscurité'],
+    image: '/scenarios/blackout.png',
+    categoryWeights: { social: 1.65, refuge: 1.45 },
+    startingEffects: [{ type: 'fatigue', amount: 6, target: 'all' }, { type: 'flag', key: 'scenario_blackout', value: true }],
+  },
+  {
+    id: 'flood',
+    title: 'Les eaux montent',
+    eyebrow: 'La rivière a repris la ville',
+    pitch: 'Après dix jours de pluie, les digues ont cédé. Les rues sont devenues des courants noirs et les quartiers bas disparaissent un à un sous l’eau contaminée.',
+    situation: 'Vous occupez le dernier étage d’un atelier. La toiture reste sèche, mais les réserves sont en bas et la seule route vers le nord sera bientôt submergée.',
+    threats: ['Chaque déplacement peut séparer le groupe', 'L’eau disponible n’est pas forcément potable', 'Les itinéraires sûrs se refermeront rapidement'],
+    image: '/scenarios/flood.png',
+    categoryWeights: { expédition: 1.75, social: 1.25 },
+    startingEffects: [{ type: 'resource', key: 'water', amount: 2 }, { type: 'morale', amount: -4, target: 'all' }, { type: 'flag', key: 'scenario_flood', value: true }],
+  },
+];
+
+export function getScenario(state: Pick<GameState, 'scenarioId' | 'seed'>) {
+  return SCENARIOS.find((scenario) => scenario.id === state.scenarioId) ?? SCENARIOS[state.seed % SCENARIOS.length];
+}
 
 export const EQUIPMENT: EquipmentDefinition[] = [
   { id: 'water', label: 'Réserve d’eau', description: '12 rations', weight: 2, icon: 'Droplets', grant: { water: 12 } },
@@ -141,7 +225,29 @@ const CHOICE = (
   result: string,
   effects: Effect[],
   requires?: EventChoice['requires'],
-): EventChoice => ({ id, label, hint, risk, result, effects, requires });
+): EventChoice => ({ id, label, hint, risk, result, effects, requires, consequence: consequenceFromEffects(effects, hint) });
+
+function consequenceFromEffects(effects: Effect[], hint: string): EventChoice['consequence'] {
+  const resources: Record<ResourceKey, string> = { water: 'eau', food: 'vivres', medicine: 'soins', materials: 'matériaux' };
+  const immediate = effects.flatMap((effect) => {
+    if (effect.type === 'resource') return [`${effect.amount > 0 ? '+' : ''}${effect.amount} ${resources[effect.key]}`];
+    if (effect.type === 'health') return [`Santé ${effect.amount > 0 ? '+' : ''}${effect.amount}${effect.target === 'all' ? ' pour tous' : ''}`];
+    if (effect.type === 'morale') return [`Moral ${effect.amount > 0 ? '+' : ''}${effect.amount}${effect.target === 'all' ? ' pour tous' : ''}`];
+    if (effect.type === 'fatigue') return [`Fatigue ${effect.amount > 0 ? '+' : ''}${effect.amount}${effect.target === 'all' ? ' pour tous' : ''}`];
+    if (effect.type === 'condition') return [`Risque durable : ${effect.name}`];
+    if (effect.type === 'split') return ['Le groupe se sépare'];
+    if (effect.type === 'expedition') return ['Une expédition est comptabilisée'];
+    if (effect.type === 'finish') return ['Cette décision peut terminer la partie'];
+    return [];
+  });
+  const isPersistent = effects.some((effect) => effect.type === 'flag' || effect.type === 'condition' || effect.type === 'split');
+  const opensFuture = effects.some((effect) => effect.type === 'flag');
+  return {
+    immediate: immediate.length ? immediate : [hint],
+    persistent: isPersistent ? 'Cette décision laissera une trace dans la partie.' : undefined,
+    future: opensFuture ? 'Elle peut ouvrir, modifier ou fermer une scène future.' : 'Elle modifiera vos options et vos ressources pour la suite.',
+  };
+}
 
 export const EVENTS: EventDefinition[] = [
   {
@@ -170,6 +276,7 @@ export const EVENTS: EventDefinition[] = [
     unique: true,
     cooldownDays: 99,
     weight: 7,
+    image: '/events/warehouse-search.png',
     choices: [
       CHOICE('pair', 'Envoyer deux personnes', 'Le refuge reste occupé. Les absents vivront une scène séparée.', 'Élevé', 'Deux silhouettes disparaissent dans la poussière. Elles reviennent à la nuit avec des réserves — et une histoire que les autres n’ont pas vécue.', [{ type: 'split', awayCount: 2 }, { type: 'expedition' }, { type: 'resource', key: 'food', amount: 6 }, { type: 'resource', key: 'water', amount: 4 }]),
       CHOICE('all', 'Partir tous ensemble', 'Plus de bras, mais le refuge sera abandonné.', 'Modéré', 'Le groupe progresse lentement mais rapporte l’essentiel. Au retour, la porte du refuge est entrouverte.', [{ type: 'expedition' }, { type: 'resource', key: 'food', amount: 5 }, { type: 'flag', key: 'shelter_exposed', value: true }]),
@@ -216,6 +323,7 @@ export const EVENTS: EventDefinition[] = [
     unique: true,
     cooldownDays: 99,
     weight: 6,
+    image: '/events/fracture.png',
     choices: [
       CHOICE('help', 'La soigner', 'Coûte 1 médicament et 2 rations.', 'Modéré', 'Mina repart au matin. Avant de disparaître, elle dessine une route et promet de ne pas oublier.', [{ type: 'resource', key: 'medicine', amount: -1 }, { type: 'resource', key: 'food', amount: -2 }, { type: 'flag', key: 'helped_mina', value: true }, { type: 'morale', amount: 5 }], { resource: 'medicine', amount: 1 }),
       CHOICE('refuse', 'Fermer la grille', 'Vous gardez vos ressources.', 'Faible', 'Ses pas s’éloignent lentement. Personne ne parle pendant le repas.', [{ type: 'flag', key: 'helped_mina', value: false }, { type: 'morale', amount: -7 }]),
@@ -246,6 +354,7 @@ export const EVENTS: EventDefinition[] = [
     unique: true,
     cooldownDays: 99,
     weight: 5,
+    image: '/events/warehouse-search.png',
     choices: [
       CHOICE('crawl', 'Passer sous les gravats', 'Rapide, mais une erreur coûtera cher.', 'Extrême', 'La dalle cède au dernier passage. Tout le monde sort — l’un de vous avec la jambe brisée.', [{ type: 'condition', name: 'Fracture de la jambe', days: 2 }, { type: 'flag', key: 'tunnel_crossed', value: true }]),
       CHOICE('detour', 'Faire le détour', 'Perdez du temps et des forces.', 'Modéré', 'Le détour est long, silencieux, mais tout le monde atteint le refuge.', [{ type: 'fatigue', amount: 14, target: 'all' }]),
@@ -316,12 +425,14 @@ const cloneCharacter = (index: number): Character =>
 
 export function createGame(code: string, nickname: string): GameState {
   const hostId = crypto.randomUUID();
+  const seed = hashCode(code);
   return {
     code,
     version: 1,
     phase: 'lobby',
     day: 0,
-    seed: hashCode(code),
+    seed,
+    scenarioId: SCENARIOS[seed % SCENARIOS.length].id,
     hostPlayerId: hostId,
     players: [{ id: hostId, nickname, isHost: true, ready: true, character: cloneCharacter(0), alive: true }],
     selectedEquipment: ['water', 'food', 'medkit', 'radio', 'rope'],
@@ -329,6 +440,8 @@ export function createGame(code: string, nickname: string): GameState {
     flags: {},
     seenEvents: [],
     log: [],
+    decisions: [],
+    messages: [],
   };
 }
 
@@ -356,6 +469,42 @@ export function addPlayer(state: GameState, nickname: string, playerId: string):
   };
 }
 
+export function chatDetectionRisk(state: GameState, senderId: string) {
+  const sender = state.players.find((player) => player.id === senderId);
+  const discretion = sender?.character.skills.Discrétion ?? 0;
+  const crowdPenalty = Math.max(0, state.players.filter((player) => player.alive).length - 3) * 4;
+  return Math.max(15, Math.min(55, 39 + crowdPenalty - discretion * 5));
+}
+
+export function sendPrivateMessage(state: GameState, senderId: string, recipientId: string, text: string): GameState {
+  const body = text.trim().slice(0, 280);
+  const sender = state.players.find((player) => player.id === senderId && player.alive);
+  const recipient = state.players.find((player) => player.id === recipientId && player.alive);
+  if (!body || !sender || !recipient || senderId === recipientId) return state;
+
+  const observers = state.players.filter((player) => player.alive && player.id !== senderId && player.id !== recipientId);
+  const detectionSeed = state.seed + state.version * 97 + hashCode(`${senderId}:${recipientId}:${body}`);
+  const detected = observers.length > 0 && seededUnit(detectionSeed) < chatDetectionRisk(state, senderId) / 100;
+  const detectedByIds = detected
+    ? [observers[Math.floor(seededUnit(detectionSeed + 19) * observers.length)].id]
+    : [];
+  const messages = state.messages ?? [];
+
+  return {
+    ...state,
+    messages: [...messages, {
+      id: crypto.randomUUID(),
+      day: state.day,
+      senderId,
+      recipientId,
+      text: body,
+      detectedByIds,
+      createdAt: Date.now(),
+    }],
+    version: state.version + 1,
+  };
+}
+
 export function equipmentWeight(ids: string[]) {
   return ids.reduce((total, id) => total + (EQUIPMENT.find((item) => item.id === id)?.weight ?? 0), 0);
 }
@@ -374,6 +523,11 @@ export function beginEquipment(state: GameState): GameState {
   return { ...state, phase: 'equipment', version: state.version + 1 };
 }
 
+export function beginBriefing(state: GameState): GameState {
+  if (state.players.length < 3) return state;
+  return { ...state, phase: 'briefing', version: state.version + 1 };
+}
+
 export function beginSurvival(state: GameState): GameState {
   if (equipmentWeight(state.selectedEquipment) > 8 || state.selectedEquipment.length === 0) return state;
   const resources: GameState['resources'] = { water: 0, food: 0, medicine: 0, materials: 0 };
@@ -386,15 +540,17 @@ export function beginSurvival(state: GameState): GameState {
     }
     if (item.flag) flags[item.flag] = true;
   }
-  const started: GameState = {
+  const scenario = getScenario(state);
+  let started: GameState = {
     ...state,
     day: 1,
     phase: 'event',
     resources,
     flags,
     version: state.version + 1,
-    log: [{ day: 0, title: 'Évacuation', text: `Le groupe emporte ${state.selectedEquipment.length} objets. La porte se referme.`, tone: 'neutral' }],
+    log: [{ day: 0, title: scenario.title, text: `${scenario.situation} Le groupe emporte ${state.selectedEquipment.length} objets.`, tone: 'neutral' }],
   };
+  for (const effect of scenario.startingEffects) started = applyEffect(started, effect);
   return drawEvent(started);
 }
 
@@ -454,6 +610,19 @@ export function resolveChoice(state: GameState, choiceId: string): GameState {
     next.lastResolution = 'Mina se souvient de votre aide. Elle dépose deux soins et trace une route sûre vers le nord.';
   }
   next.log = [...next.log, { day: state.day, title: event.title, text: next.lastResolution ?? choice.result, tone: endingTone(next.ending) }];
+  const decisions = state.decisions ?? [];
+  next.decisions = [...decisions, {
+    id: `${state.day}-${event.id}-${choice.id}`,
+    day: state.day,
+    eventId: event.id,
+    eventTitle: event.title,
+    choiceId: choice.id,
+    choiceLabel: choice.label,
+    immediate: choice.consequence.immediate,
+    persistent: choice.consequence.persistent,
+    future: choice.consequence.future,
+    outcome: next.lastResolution ?? choice.result,
+  }];
   next.version += 1;
   return next;
 }
@@ -521,8 +690,21 @@ function drawEvent(state: GameState): GameState {
     const delayed = eligible.find((event) => event.id === 'family_returns');
     if (delayed) eligible = [delayed, ...eligible.filter((event) => event.id !== delayed.id)];
   }
-  const event = eligible[seededIndex(state.seed + state.day * 31, eligible.length)] ?? unseen[0] ?? EVENTS[EVENTS.length - 1];
+  const scenario = getScenario(state);
+  const event = weightedEvent(eligible, state.seed + state.day * 31, scenario) ?? unseen[0] ?? EVENTS[EVENTS.length - 1];
   return { ...state, currentEventId: event.id, seenEvents: [...state.seenEvents, event.id] };
+}
+
+function weightedEvent(events: EventDefinition[], seed: number, scenario: ScenarioDefinition) {
+  if (events.length === 0) return undefined;
+  const weights = events.map((event) => event.weight * (scenario.categoryWeights[event.category] ?? 1));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let cursor = seededUnit(seed) * total;
+  for (let index = 0; index < events.length; index += 1) {
+    cursor -= weights[index];
+    if (cursor <= 0) return events[index];
+  }
+  return events.at(-1);
 }
 
 function conditionsMet(state: GameState, conditions: EventCondition[]) {
@@ -533,10 +715,9 @@ function conditionsMet(state: GameState, conditions: EventCondition[]) {
   });
 }
 
-function seededIndex(seed: number, length: number) {
-  if (length <= 1) return 0;
+function seededUnit(seed: number) {
   const value = Math.abs(Math.sin(seed) * 10000);
-  return Math.floor((value - Math.floor(value)) * length);
+  return value - Math.floor(value);
 }
 
 function hashCode(value: string) {

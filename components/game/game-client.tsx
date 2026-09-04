@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Image from 'next/image';
 import {
   Activity,
   ArrowLeft,
@@ -18,9 +19,13 @@ import {
   History,
   Layers,
   Link as LinkIcon,
+  LockKeyhole,
   Map,
+  MessageCircle,
   Radio,
   RotateCcw,
+  Send,
+  ShieldAlert,
   Soup,
   Sparkles,
   Users,
@@ -36,15 +41,19 @@ import {
   addPlayer,
   addTestPlayers,
   advanceDay,
+  beginBriefing,
   beginEquipment,
   beginSurvival,
+  chatDetectionRisk,
   choiceAvailable,
   createGame,
   currentEvent,
   equipmentWeight,
   EQUIPMENT,
   GameState,
+  getScenario,
   resolveChoice,
+  sendPrivateMessage,
   statusLabel,
   toggleEquipment,
 } from '@/lib/game';
@@ -58,7 +67,7 @@ export function GameClient({ code }: Props) {
   const [game, setGame] = useState<GameState | null>(null);
   const [playerId, setPlayerId] = useState('');
   const [hydrated, setHydrated] = useState(false);
-  const [panel, setPanel] = useState<'game' | 'character' | 'history'>('game');
+  const [panel, setPanel] = useState<'game' | 'character' | 'history' | 'chat'>('game');
 
   useEffect(() => {
     const normalizedCode = code.toUpperCase();
@@ -121,11 +130,15 @@ export function GameClient({ code }: Props) {
   if (panel === 'history') {
     return <HistoryScreen game={game} onBack={() => setPanel('game')} />;
   }
+  if (panel === 'chat') {
+    return <ChatScreen game={game} playerId={currentPlayer.id} onBack={() => setPanel('game')} onSend={(recipientId, text) => update((state) => sendPrivateMessage(state, currentPlayer.id, recipientId, text))} />;
+  }
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
-      <GameHeader game={game} onCharacter={() => setPanel('character')} onHistory={() => setPanel('history')} />
-      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} onFill={() => update(addTestPlayers)} onStart={() => update(beginEquipment)} />}
+      <GameHeader game={game} currentPlayerId={currentPlayer.id} onCharacter={() => setPanel('character')} onHistory={() => setPanel('history')} onChat={() => setPanel('chat')} />
+      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} onFill={() => update(addTestPlayers)} onStart={() => update(beginBriefing)} />}
+      {game.phase === 'briefing' && <Briefing game={game} onContinue={() => update(beginEquipment)} />}
       {game.phase === 'equipment' && <Equipment game={game} onToggle={(id) => update((state) => toggleEquipment(state, id))} onStart={() => update(beginSurvival)} />}
       {game.phase === 'event' && <EventScreen game={game} onChoose={(choiceId) => update((state) => resolveChoice(state, choiceId))} />}
       {game.phase === 'resolution' && <ResolutionScreen game={game} onContinue={() => update(advanceDay)} />}
@@ -137,7 +150,8 @@ export function GameClient({ code }: Props) {
   );
 }
 
-function GameHeader({ game, onCharacter, onHistory }: { game: GameState; onCharacter: () => void; onHistory: () => void }) {
+function GameHeader({ game, currentPlayerId, onCharacter, onHistory, onChat }: { game: GameState; currentPlayerId: string; onCharacter: () => void; onHistory: () => void; onChat: () => void }) {
+  const privateCount = (game.messages ?? []).filter((message) => message.senderId === currentPlayerId || message.recipientId === currentPlayerId || message.detectedByIds.includes(currentPlayerId)).length;
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-background/90 backdrop-blur-xl">
       <div className="mx-auto flex h-16 w-full max-w-lg items-center justify-between px-5">
@@ -150,6 +164,10 @@ function GameHeader({ game, onCharacter, onHistory }: { game: GameState; onChara
         </button>
         <div className="flex items-center gap-1">
           {game.day > 0 && <Badge variant="outline" className="mr-1 border-primary/25 bg-primary/10 font-mono text-[10px] text-primary">JOUR {game.day}</Badge>}
+          <Button size="icon" variant="ghost" onClick={onChat} aria-label="Messages privés" className="relative">
+            <MessageCircle />
+            {privateCount > 0 && <span className="absolute right-1 top-1 size-1.5 rounded-full bg-primary" />}
+          </Button>
           <Button size="icon" variant="ghost" onClick={onHistory} aria-label="Historique"><History /></Button>
           <Button size="icon" variant="ghost" onClick={onCharacter} aria-label="Personnage"><Users /></Button>
         </div>
@@ -198,6 +216,50 @@ function Lobby({ game, currentPlayerId, onFill, onStart }: { game: GameState; cu
         </Button>
       </div>
       <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">Le mode local synchronise les onglets de ce navigateur. Le schéma Supabase fourni active le vrai multitéléphone.</p>
+    </Screen>
+  );
+}
+
+function Briefing({ game, onContinue }: { game: GameState; onContinue: () => void }) {
+  const scenario = getScenario(game);
+  return (
+    <Screen>
+      <article className="overflow-hidden rounded-2xl border border-white/10 bg-card/70 shadow-2xl shadow-black/30">
+        <div className="relative aspect-[3/2] overflow-hidden">
+          <Image src={scenario.image} alt={`Illustration — ${scenario.title}`} fill priority sizes="(max-width: 512px) 100vw, 512px" className="object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-card via-card/15 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 p-5">
+            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-primary">Scénario de cette partie</p>
+            <h1 className="mt-2 text-4xl font-black leading-none tracking-[-0.05em]">{scenario.title}</h1>
+          </div>
+        </div>
+        <div className="space-y-5 p-5 pt-3">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-foreground/70">{scenario.eyebrow}</p>
+            <p className="mt-3 text-[15px] leading-7 text-foreground/90">{scenario.pitch}</p>
+          </div>
+          <div className="rounded-xl border border-primary/20 bg-primary/[0.06] p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-primary">La situation maintenant</p>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">{scenario.situation}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Ce qui vous attend</p>
+            <div className="mt-3 space-y-2">
+              {scenario.threats.map((threat) => (
+                <div key={threat} className="flex gap-3 text-sm leading-5">
+                  <span className="mt-2 size-1.5 shrink-0 rounded-full bg-primary" />
+                  <span>{threat}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </article>
+      <p className="mt-4 text-center text-[11px] leading-5 text-muted-foreground">Ce scénario est lié au code de la partie. Il influence les dangers, l’état initial et les événements probables.</p>
+      <Button className="mt-5 h-13 w-full justify-between rounded-xl px-5" onClick={onContinue}>
+        Choisir ce que vous emportez
+        <ArrowRight />
+      </Button>
     </Screen>
   );
 }
@@ -254,6 +316,7 @@ function Equipment({ game, onToggle, onStart }: { game: GameState; onToggle: (id
 function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: string) => void }) {
   const event = currentEvent(game);
   if (!event) return null;
+  const artwork = event.image ?? getScenario(game).image;
   return (
     <Screen>
       <ResourceStrip game={game} />
@@ -267,6 +330,10 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
 
       <Card className="overflow-hidden border-white/10 bg-card/75 shadow-2xl shadow-black/20">
         <div className={`h-1 ${event.visibility === 'private' ? 'bg-primary' : event.category === 'issue' ? 'bg-emerald-500' : 'bg-white/15'}`} />
+        <div className="relative aspect-[5/2] overflow-hidden border-b border-white/10">
+          <Image src={artwork} alt={`Illustration — ${event.title}`} fill sizes="(max-width: 512px) 100vw, 512px" className="object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-card/80 via-transparent to-transparent" />
+        </div>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between gap-2">
             <Badge variant="outline" className="border-white/10 bg-white/[0.04] text-[9px] uppercase tracking-[0.16em] text-muted-foreground">{event.category}</Badge>
@@ -300,6 +367,14 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
                       <RiskBadge risk={choice.risk} />
                     </span>
                     <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">{available ? choice.hint : 'Ressource ou équipement manquant.'}</span>
+                    {available && (
+                      <span className="mt-3 flex flex-wrap gap-1.5">
+                        {choice.consequence.immediate.map((item) => (
+                          <span key={item} className="rounded-md border border-white/10 bg-black/15 px-2 py-1 font-mono text-[9px] text-foreground/70">{item}</span>
+                        ))}
+                        {choice.consequence.persistent && <span className="rounded-md border border-primary/20 bg-primary/[0.06] px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-primary">Trace future</span>}
+                      </span>
+                    )}
                   </span>
                   <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground transition group-hover:translate-x-0.5 group-hover:text-primary" />
                 </div>
@@ -315,15 +390,35 @@ function EventScreen({ game, onChoose }: { game: GameState; onChoose: (id: strin
 
 function ResolutionScreen({ game, onContinue }: { game: GameState; onContinue: () => void }) {
   const event = currentEvent(game);
+  const decision = (game.decisions ?? []).at(-1);
+  const hasFracture = decision?.immediate.some((item) => item.includes('Fracture'))
+    || game.players.some((player) => player.character.conditions.some((condition) => condition.name.includes('Fracture')));
+  const artwork = hasFracture ? '/events/fracture.png' : event?.image ?? getScenario(game).image;
   return (
     <Screen>
       <div className="flex min-h-[calc(100dvh-9rem)] flex-col justify-center">
+        <div className="relative mb-6 aspect-[5/2] overflow-hidden rounded-2xl border border-white/10">
+          <Image src={artwork} alt="Illustration de la conséquence" fill sizes="(max-width: 512px) 100vw, 512px" className="object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-background/70 to-transparent" />
+        </div>
         <div className="mb-5 grid size-12 place-items-center rounded-full border border-primary/30 bg-primary/10">
           {game.ending ? <Sparkles className="size-5 text-primary" /> : <Zap className="size-5 text-primary" />}
         </div>
         <SectionLabel icon={Activity}>Conséquence · Jour {game.day}</SectionLabel>
         <h1 className="mt-3 text-4xl font-black leading-none tracking-[-0.045em]">{event?.title}</h1>
         <p className="mt-6 text-lg leading-8 text-foreground/90">{game.lastResolution}</p>
+
+        {decision && (
+          <div className="mt-7 rounded-2xl border border-white/10 bg-card/60 p-4">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Branche choisie</p>
+            <div className="relative mt-4 space-y-3 pl-7 before:absolute before:bottom-5 before:left-[9px] before:top-5 before:w-px before:bg-primary/30">
+              <DecisionNode label="Votre choix" text={decision.choiceLabel} tone="choice" />
+              <DecisionNode label="Effet immédiat" text={decision.immediate.join(' · ')} />
+              {decision.persistent && <DecisionNode label="Trace persistante" text={decision.persistent} tone="persistent" />}
+              {decision.future && <DecisionNode label="Conséquence future" text={decision.future} tone="future" />}
+            </div>
+          </div>
+        )}
 
         {game.splitGroup && (
           <div className="mt-6 rounded-xl border border-sky-400/20 bg-sky-400/[0.06] p-4">
@@ -391,6 +486,99 @@ function EndingScreen({ game, onRestart }: { game: GameState; onRestart: () => v
   );
 }
 
+function ChatScreen({ game, playerId, onBack, onSend }: { game: GameState; playerId: string; onBack: () => void; onSend: (recipientId: string, text: string) => void }) {
+  const recipients = game.players.filter((player) => player.alive && player.id !== playerId);
+  const [recipientId, setRecipientId] = useState(recipients[0]?.id ?? '');
+  const [draft, setDraft] = useState('');
+  const risk = chatDetectionRisk(game, playerId);
+  const messages = [...(game.messages ?? [])]
+    .filter((message) => (
+      (message.senderId === playerId && message.recipientId === recipientId)
+      || (message.senderId === recipientId && message.recipientId === playerId)
+      || message.detectedByIds.includes(playerId)
+    ))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const playerName = (id: string) => game.players.find((player) => player.id === id)?.nickname ?? 'Inconnu';
+
+  const submit = () => {
+    if (!recipientId || !draft.trim()) return;
+    onSend(recipientId, draft);
+    setDraft('');
+  };
+
+  return (
+    <main className="min-h-dvh bg-background">
+      <SubHeader title="Conversation discrète" onBack={onBack} />
+      <Screen>
+        <div className="relative aspect-[5/2] overflow-hidden rounded-2xl border border-white/10">
+          <Image src="/events/secret-chat.png" alt="Deux survivants parlent discrètement" fill priority sizes="(max-width: 512px) 100vw, 512px" className="object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-background/90 via-background/10 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 p-4">
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-primary"><LockKeyhole className="size-3.5" /> Canal privé</div>
+          </div>
+        </div>
+
+        <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2 text-xs font-bold text-amber-200"><ShieldAlert className="size-4" /> Risque d’être repéré</span>
+            <span className="font-mono text-sm font-black text-amber-300">{risk}%</span>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">Si quelqu’un vous surprend, il saura qui parle avec qui, mais ne verra pas le contenu du message. La Discrétion réduit ce risque.</p>
+        </div>
+
+        <p className="mt-6 text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Parler à</p>
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+          {recipients.map((player) => (
+            <button key={player.id} onClick={() => setRecipientId(player.id)} className={`shrink-0 rounded-xl border px-4 py-3 text-left transition ${recipientId === player.id ? 'border-primary/50 bg-primary/10' : 'border-white/10 bg-card/55'}`}>
+              <div className="text-xs font-bold">{player.nickname}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">{player.character.name}</div>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-6 min-h-40 space-y-3">
+          {messages.map((message) => {
+            const observerOnly = message.senderId !== playerId && message.recipientId !== playerId;
+            if (observerOnly) {
+              return (
+                <div key={message.id} className="rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-4">
+                  <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-amber-300"><Eye className="size-3.5" /> Conversation détectée</div>
+                  <p className="mt-2 text-xs leading-5 text-foreground/80">Tu as surpris <strong>{playerName(message.senderId)}</strong> et <strong>{playerName(message.recipientId)}</strong> en train de parler à voix basse.</p>
+                  <p className="mt-1 text-[10px] text-muted-foreground">Contenu inaudible · Jour {message.day}</p>
+                </div>
+              );
+            }
+            const mine = message.senderId === playerId;
+            return (
+              <div key={message.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[86%] rounded-2xl px-4 py-3 ${mine ? 'rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md border border-white/10 bg-card'}`}>
+                  <div className={`text-[9px] font-bold uppercase tracking-wider ${mine ? 'text-primary-foreground/65' : 'text-muted-foreground'}`}>{mine ? 'Vous' : playerName(message.senderId)} · Jour {message.day}</div>
+                  <p className="mt-1 text-sm leading-5">{message.text}</p>
+                  {message.detectedByIds.length > 0 && <p className={`mt-2 text-[9px] font-bold uppercase tracking-wider ${mine ? 'text-primary-foreground/75' : 'text-amber-300'}`}>Quelqu’un vous a remarqués</p>}
+                </div>
+              </div>
+            );
+          })}
+          {messages.length === 0 && <p className="py-8 text-center text-xs leading-5 text-muted-foreground">Aucun échange sur ce canal. Les conversations détectées apparaîtront aussi ici.</p>}
+        </div>
+
+        <div className="sticky bottom-0 -mx-5 mt-5 border-t border-white/10 bg-background/95 px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-4 backdrop-blur-xl">
+          <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-card/80 p-2">
+            <textarea value={draft} onChange={(event) => setDraft(event.target.value.slice(0, 280))} onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                submit();
+              }
+            }} placeholder="Écrire discrètement…" rows={2} className="min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-muted-foreground" />
+            <Button size="icon" className="size-11 shrink-0 rounded-xl" disabled={!recipientId || !draft.trim()} onClick={submit} aria-label="Envoyer"><Send /></Button>
+          </div>
+          <div className="mt-2 text-right font-mono text-[9px] text-muted-foreground">{draft.length}/280</div>
+        </div>
+      </Screen>
+    </main>
+  );
+}
+
 function CharacterScreen({ game, playerId, onBack }: { game: GameState; playerId: string; onBack: () => void }) {
   const player = game.players.find((candidate) => candidate.id === playerId) ?? game.players[0];
   const character = player.character;
@@ -429,24 +617,26 @@ function CharacterScreen({ game, playerId, onBack }: { game: GameState; playerId
 }
 
 function HistoryScreen({ game, onBack }: { game: GameState; onBack: () => void }) {
+  const decisions = [...(game.decisions ?? [])].reverse();
   return (
     <main className="min-h-dvh bg-background">
       <SubHeader title="Notre histoire" onBack={onBack} />
       <Screen>
         <h1 className="text-4xl font-black tracking-[-0.045em]">Ce qui reste.</h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">Les décisions importantes de la partie, dans l’ordre où le groupe les a vécues.</p>
-        <div className="relative mt-8 space-y-5 before:absolute before:bottom-3 before:left-[7px] before:top-3 before:w-px before:bg-white/10">
-          {[...game.log].reverse().map((entry, index) => (
-            <div key={`${entry.day}-${index}`} className="relative flex gap-4">
-              <span className={`relative z-10 mt-1.5 size-3.5 shrink-0 rounded-full border-4 border-background ${entry.tone === 'good' ? 'bg-emerald-400' : entry.tone === 'bad' ? 'bg-destructive' : 'bg-primary'}`} />
-              <div>
-                <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Jour {entry.day}</div>
-                <div className="mt-1 text-sm font-bold">{entry.title}</div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">{entry.text}</p>
+        <div className="mt-8 space-y-4">
+          {decisions.map((decision) => (
+            <article key={decision.id} className="rounded-2xl border border-white/10 bg-card/55 p-4">
+              <div className="font-mono text-[10px] uppercase tracking-wider text-primary">Jour {decision.day} · {decision.eventTitle}</div>
+              <div className="relative mt-4 space-y-3 pl-7 before:absolute before:bottom-5 before:left-[9px] before:top-5 before:w-px before:bg-white/15">
+                <DecisionNode label="Décision" text={decision.choiceLabel} tone="choice" />
+                <DecisionNode label="Résultat" text={decision.outcome} />
+                {decision.persistent && <DecisionNode label="Mémoire de la partie" text={decision.persistent} tone="persistent" />}
+                {decision.future && <DecisionNode label="Branche à venir" text={decision.future} tone="future" />}
               </div>
-            </div>
+            </article>
           ))}
-          {game.log.length === 0 && <p className="text-sm text-muted-foreground">L’histoire n’a pas encore commencé.</p>}
+          {decisions.length === 0 && <p className="text-sm text-muted-foreground">L’arbre se dessinera dès la première décision.</p>}
         </div>
       </Screen>
     </main>
@@ -460,6 +650,17 @@ function ResourceStrip({ game }: { game: GameState }) {
       <Resource icon={Soup} value={game.resources.food} label="vivres" />
       <Resource icon={Cross} value={game.resources.medicine} label="soins" />
       <Resource icon={Wrench} value={game.resources.materials} label="mat." />
+    </div>
+  );
+}
+
+function DecisionNode({ label, text, tone = 'default' }: { label: string; text: string; tone?: 'default' | 'choice' | 'persistent' | 'future' }) {
+  const dot = tone === 'choice' ? 'bg-primary' : tone === 'persistent' ? 'bg-amber-400' : tone === 'future' ? 'bg-sky-400 animate-pulse' : 'bg-white/40';
+  return (
+    <div className="relative">
+      <span className={`absolute -left-7 top-1.5 z-10 size-[19px] rounded-full border-[6px] border-card ${dot}`} />
+      <div className="text-[9px] font-bold uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
+      <div className="mt-1 text-xs leading-5 text-foreground/85">{text}</div>
     </div>
   );
 }
