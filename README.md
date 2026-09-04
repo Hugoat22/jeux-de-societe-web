@@ -13,6 +13,8 @@ Ouvrir `http://localhost:3000`, puis choisir **Lancer la démo immédiate**. Dan
 
 Le mode local persiste une partie par code dans le navigateur et synchronise les onglets avec `BroadcastChannel`. Ce mode sert uniquement au playtest. Le multitéléphone sécurisé utilise les projections Supabase décrites dans [docs/SUPABASE_SETUP.md](docs/SUPABASE_SETUP.md).
 
+Le projet est une application Next.js standard conçue pour Vercel. Il ne dépend d’aucun runtime ou hébergement ChatGPT Sites.
+
 ## Ce que le prototype démontre
 
 - création, code, lobby et personnages semi-aléatoires ;
@@ -38,3 +40,13 @@ npm run lint
 npm run build
 ```
 
+## Déployer sur Vercel
+
+Connecter le dépôt dans le tableau de bord Vercel, ou utiliser la CLI :
+
+```bash
+npx vercel link
+npx vercel deploy
+```
+
+Renseigner `NEXT_PUBLIC_SITE_URL` avec l’URL Vercel finale. Ajouter les variables Supabase seulement lorsque le mode multitéléphone sera activé.

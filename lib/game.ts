@@ -426,7 +426,7 @@ function applyEffect(state: GameState, effect: Effect): GameState {
   if (effect.type === 'expedition') {
     return { ...state, players: state.players.map((player, index) => index > 0 ? { ...player, character: { ...player.character, expeditions: player.character.expeditions + 1 } } : player) };
   }
-  const targetIndex = effect.target === 'all' ? -1 : 0;
+  const targetIndex = 'target' in effect && effect.target === 'all' ? -1 : 0;
   return {
     ...state,
     players: state.players.map((player, index) => {
@@ -446,7 +446,7 @@ export function resolveChoice(state: GameState, choiceId: string): GameState {
   const event = currentEvent(state);
   const choice = event?.choices.find((candidate) => candidate.id === choiceId);
   if (!event || !choice || !choiceAvailable(state, choice)) return state;
-  let next = { ...state, lastChoiceId: choiceId, lastResolution: choice.result, phase: 'resolution' as Phase };
+  let next: GameState = { ...state, lastChoiceId: choiceId, lastResolution: choice.result, phase: 'resolution' };
   for (const effect of choice.effects) next = applyEffect(next, effect);
   if (event.id === 'family_returns' && choiceId === 'meet' && state.flags.helped_mina === true) {
     next = applyEffect(next, { type: 'resource', key: 'medicine', amount: 2 });
