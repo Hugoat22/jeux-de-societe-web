@@ -13,9 +13,10 @@ export default function Home() {
   const [code, setCode] = useState('');
   const [nickname, setNickname] = useState('');
 
-  const enterGame = (targetCode: string) => {
+  const enterGame = (targetCode: string, entryMode: 'create' | 'join' | 'demo') => {
     const cleanName = nickname.trim() || 'Survivant';
     sessionStorage.setItem('cendre:nickname', cleanName.slice(0, 24));
+    sessionStorage.setItem('cendre:entry-mode', entryMode);
     window.location.assign(`/game/${targetCode}`);
   };
 
@@ -75,6 +76,7 @@ export default function Home() {
               </Button>
               <Button variant="ghost" className="h-10 w-full text-xs text-muted-foreground" onClick={() => {
                 sessionStorage.setItem('cendre:nickname', 'Hugo');
+                sessionStorage.setItem('cendre:entry-mode', 'demo');
                 window.location.assign('/game/demo');
               }}>
                 Lancer la démo immédiate
@@ -112,7 +114,7 @@ export default function Home() {
                 <Button
                   disabled={nickname.trim().length < 1 || (mode === 'join' && code.length !== 4)}
                   className="h-12 w-full rounded-xl"
-                  onClick={() => enterGame(mode === 'create' ? createCode() : code)}
+                  onClick={() => enterGame(mode === 'create' ? createCode() : code, mode)}
                 >
                   {mode === 'create' ? 'Créer le groupe' : 'Rejoindre le groupe'}
                 </Button>
@@ -132,4 +134,3 @@ export default function Home() {
     </main>
   );
 }
-

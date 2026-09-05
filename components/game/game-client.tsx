@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import {
   Activity,
@@ -59,6 +59,16 @@ import {
   statusLabel,
   toggleEquipment,
 } from '@/lib/game';
+import {
+  createGameRoom,
+  ensureAnonymousSession,
+  fetchGameProjection,
+  getSupabaseBrowserClient,
+  joinGameRoom,
+  saveGameRoom,
+  sendGameMessage,
+  subscribeToGameProjection,
+} from '@/lib/supabase/client';
 
 const STORAGE_PREFIX = 'cendre:game:';
 const iconMap = { Droplets, Soup, Cross, Radio, Wrench, Link: LinkIcon, Layers, Map, Flashlight };
@@ -68,63 +78,141 @@ type Props = { code: string };
 export function GameClient({ code }: Props) {
   const [game, setGame] = useState<GameState | null>(null);
   const [playerId, setPlayerId] = useState('');
-  const [hydrated, setHydrated] = useState(false);
+  const [syncMode, setSyncMode] = useState<'loading' | 'local' | 'remote'>('loading');
+  const [connectionError, setConnectionError] = useState('');
   const [panel, setPanel] = useState<'game' | 'character' | 'history' | 'chat'>('game');
+  const remoteGameId = useRef<string | null>(null);
 
   useEffect(() => {
     const normalizedCode = code.toUpperCase();
-    let identity = sessionStorage.getItem('cendre:player-id');
-    if (!identity) {
-      identity = crypto.randomUUID();
-      sessionStorage.setItem('cendre:player-id', identity);
-    }
-    // External session storage is the source of truth for this device identity.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPlayerId(identity);
     const nickname = sessionStorage.getItem('cendre:nickname')?.trim() || 'Hugo';
-    const stored = localStorage.getItem(`${STORAGE_PREFIX}${normalizedCode}`);
-    let initial = stored ? (JSON.parse(stored) as GameState) : createGame(normalizedCode, nickname);
-    if (stored && !initial.players.some((player) => player.id === identity)) {
-      initial = addPlayer(initial, nickname, identity);
-    }
-    if (!stored && initial.players[0]) {
-      initial = { ...initial, hostPlayerId: identity, players: [{ ...initial.players[0], id: identity }] };
-    }
-    setGame(initial);
-    setHydrated(true);
+    const entryMode = sessionStorage.getItem('cendre:entry-mode') ?? 'join';
+    let disposed = false;
+    let cleanup = () => {};
 
-    const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(`cendre-${normalizedCode}`) : null;
-    channel?.addEventListener('message', (message: MessageEvent<GameState>) => {
-      setGame((current) => (!current || message.data.version > current.version ? message.data : current));
-    });
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === `${STORAGE_PREFIX}${normalizedCode}` && event.newValue) {
-        const incoming = JSON.parse(event.newValue) as GameState;
-        setGame((current) => (!current || incoming.version > current.version ? incoming : current));
+    const startLocalGame = () => {
+      let identity = sessionStorage.getItem('cendre:player-id');
+      if (!identity) {
+        identity = crypto.randomUUID();
+        sessionStorage.setItem('cendre:player-id', identity);
+      }
+      const stored = localStorage.getItem(`${STORAGE_PREFIX}${normalizedCode}`);
+      let initial = stored ? (JSON.parse(stored) as GameState) : createGame(normalizedCode, nickname);
+      if (stored && !initial.players.some((player) => player.id === identity)) initial = addPlayer(initial, nickname, identity);
+      if (!stored && initial.players[0]) initial = { ...initial, hostPlayerId: identity, players: [{ ...initial.players[0], id: identity }] };
+      setPlayerId(identity);
+      setGame(initial);
+      setSyncMode('local');
+
+      const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(`cendre-${normalizedCode}`) : null;
+      channel?.addEventListener('message', (message: MessageEvent<GameState>) => {
+        setGame((current) => (!current || message.data.version > current.version ? message.data : current));
+      });
+      const onStorage = (event: StorageEvent) => {
+        if (event.key === `${STORAGE_PREFIX}${normalizedCode}` && event.newValue) {
+          const incoming = JSON.parse(event.newValue) as GameState;
+          setGame((current) => (!current || incoming.version > current.version ? incoming : current));
+        }
+      };
+      window.addEventListener('storage', onStorage);
+      cleanup = () => {
+        channel?.close();
+        window.removeEventListener('storage', onStorage);
+      };
+    };
+
+    const start = async () => {
+      try {
+        if (normalizedCode === 'DEMO' || entryMode === 'demo' || !getSupabaseBrowserClient()) {
+          startLocalGame();
+          return;
+        }
+
+        const session = await ensureAnonymousSession();
+        if (!session) throw new Error('anonymous_session_unavailable');
+        const identity = session.user.id;
+        let room;
+
+        if (entryMode === 'create') {
+          let initial = createGame(normalizedCode, nickname);
+          initial = {
+            ...initial,
+            hostPlayerId: identity,
+            players: initial.players.map((player, index) => index === 0 ? { ...player, id: identity } : player),
+          };
+          room = await createGameRoom(normalizedCode, nickname, initial);
+        } else {
+          room = await joinGameRoom(normalizedCode, nickname);
+        }
+
+        if (disposed) return;
+        remoteGameId.current = room.gameId;
+        setPlayerId(identity);
+        setGame(room.payload);
+        setSyncMode('remote');
+
+        cleanup = subscribeToGameProjection(room.gameId, () => {
+          void fetchGameProjection(room.gameId).then((fresh) => {
+            if (!disposed) setGame((current) => (!current || fresh.payload.version >= current.version ? fresh.payload : current));
+          }).catch(() => {});
+        });
+      } catch (error) {
+        if (!disposed) {
+          const message = error instanceof Error ? error.message : String(error);
+          setConnectionError(connectionMessage(message));
+        }
       }
     };
-    window.addEventListener('storage', onStorage);
+
+    void start();
     return () => {
-      channel?.close();
-      window.removeEventListener('storage', onStorage);
+      disposed = true;
+      cleanup();
     };
   }, [code]);
 
   useEffect(() => {
-    if (!hydrated || !game) return;
+    if (syncMode !== 'local' || !game) return;
     localStorage.setItem(`${STORAGE_PREFIX}${game.code}`, JSON.stringify(game));
     const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(`cendre-${game.code}`) : null;
     channel?.postMessage(game);
     channel?.close();
-  }, [game, hydrated]);
+  }, [game, syncMode]);
 
   const currentPlayer = game?.players.find((player) => player.id === playerId) ?? game?.players[0];
+
+  if (connectionError) {
+    return <ConnectionErrorScreen message={connectionError} />;
+  }
 
   if (!game || !currentPlayer) {
     return <LoadingScreen />;
   }
 
-  const update = (fn: (state: GameState) => GameState) => setGame((state) => (state ? fn(state) : state));
+  const update = (fn: (state: GameState) => GameState) => {
+    const current = game;
+    const next = fn(current);
+    if (next === current) return;
+    setGame(next);
+    if (syncMode === 'remote' && remoteGameId.current) {
+      void saveGameRoom(remoteGameId.current, next, current.version)
+        .then((saved) => setGame(saved.payload))
+        .catch(() => {
+          if (!remoteGameId.current) return;
+          void fetchGameProjection(remoteGameId.current).then((fresh) => setGame(fresh.payload));
+        });
+    }
+  };
+
+  const sendMessage = (recipientId: string, text: string) => {
+    if (syncMode === 'remote' && remoteGameId.current) {
+      void sendGameMessage(remoteGameId.current, recipientId, text)
+        .then((saved) => setGame(saved.payload))
+        .catch((error) => setConnectionError(connectionMessage(error instanceof Error ? error.message : String(error))));
+      return;
+    }
+    update((state) => sendPrivateMessage(state, currentPlayer.id, recipientId, text));
+  };
 
   if (panel === 'character') {
     return <CharacterScreen game={game} playerId={currentPlayer.id} onBack={() => setPanel('game')} />;
@@ -133,13 +221,13 @@ export function GameClient({ code }: Props) {
     return <HistoryScreen game={game} onBack={() => setPanel('game')} />;
   }
   if (panel === 'chat') {
-    return <ChatScreen game={game} playerId={currentPlayer.id} onBack={() => setPanel('game')} onSend={(recipientId, text) => update((state) => sendPrivateMessage(state, currentPlayer.id, recipientId, text))} />;
+    return <ChatScreen game={game} playerId={currentPlayer.id} onBack={() => setPanel('game')} onSend={sendMessage} />;
   }
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
       <GameHeader game={game} currentPlayerId={currentPlayer.id} onCharacter={() => setPanel('character')} onHistory={() => setPanel('history')} onChat={() => setPanel('chat')} />
-      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} onStart={() => update(beginBriefing)} onStartDuo={() => update(startDuoMode)} />}
+      {game.phase === 'lobby' && <Lobby game={game} currentPlayerId={currentPlayer.id} online={syncMode === 'remote'} onStart={() => update(beginBriefing)} onStartDuo={() => update(startDuoMode)} />}
       {game.phase === 'briefing' && <Briefing game={game} onContinue={() => update(beginEquipment)} />}
       {game.phase === 'equipment' && <Equipment game={game} onToggle={(id) => update((state) => toggleEquipment(state, id))} onStart={() => update(beginSurvival)} />}
       {game.phase === 'event' && <EventScreen game={game} onChoose={(choiceId) => update((state) => resolveChoice(state, choiceId))} />}
@@ -178,7 +266,7 @@ function GameHeader({ game, currentPlayerId, onCharacter, onHistory, onChat }: {
   );
 }
 
-function Lobby({ game, currentPlayerId, onStart, onStartDuo }: { game: GameState; currentPlayerId: string; onStart: () => void; onStartDuo: () => void }) {
+function Lobby({ game, currentPlayerId, online, onStart, onStartDuo }: { game: GameState; currentPlayerId: string; online: boolean; onStart: () => void; onStartDuo: () => void }) {
   const isHost = game.hostPlayerId === currentPlayerId;
   const humans = game.players.filter((player) => !player.isBot);
   return (
@@ -225,7 +313,7 @@ function Lobby({ game, currentPlayerId, onStart, onStartDuo }: { game: GameState
           <ArrowRight />
         </Button>
       </div>
-      <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">Le mode local synchronise les onglets de ce navigateur. Le schéma Supabase fourni active le vrai multitéléphone.</p>
+      <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">{online ? 'Partie synchronisée en ligne entre tous les téléphones.' : 'Démo locale synchronisée entre les onglets de ce navigateur.'}</p>
     </Screen>
   );
 }
@@ -744,4 +832,28 @@ function Screen({ children }: { children: React.ReactNode }) {
 
 function LoadingScreen() {
   return <main className="grid min-h-dvh place-items-center bg-background"><div className="text-center"><Radio className="mx-auto size-6 animate-pulse text-primary" /><p className="mt-3 text-xs uppercase tracking-[0.2em] text-muted-foreground">Recherche du signal</p></div></main>;
+}
+
+function ConnectionErrorScreen({ message }: { message: string }) {
+  return (
+    <main className="grid min-h-dvh place-items-center bg-background px-5 text-foreground">
+      <Card className="w-full max-w-sm border-destructive/25 bg-card/80">
+        <CardContent className="p-6 text-center">
+          <ShieldAlert className="mx-auto size-7 text-destructive" />
+          <h1 className="mt-4 text-xl font-black">Connexion impossible</h1>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">{message}</p>
+          <Button className="mt-5 w-full" onClick={() => window.location.assign('/')}>Retour à l’accueil</Button>
+        </CardContent>
+      </Card>
+    </main>
+  );
+}
+
+function connectionMessage(message: string) {
+  if (message.includes('game_not_found')) return 'Cette partie est introuvable. Vérifiez le code à quatre caractères.';
+  if (message.includes('game_code_already_exists')) return 'Ce code vient d’être utilisé. Revenez à l’accueil et créez une nouvelle partie.';
+  if (message.includes('game_already_started')) return 'Cette partie a déjà commencé et n’accepte plus de nouveaux joueurs.';
+  if (message.includes('game_is_full')) return 'Cette partie est déjà complète.';
+  if (message.includes('anonymous') || message.includes('authentication_required')) return 'Les connexions anonymes ne sont pas encore actives dans Supabase.';
+  return 'Le serveur multijoueur ne répond pas. Réessayez dans quelques instants.';
 }
